@@ -1,0 +1,18 @@
+from cartera.db import conectar, crear_tablas, insertar_activos
+
+ACTIVOS = [
+    ("BBVA.MC", "BBVA", "Banca", "EUR"),
+    ("JPM", "JP Morgan", "Banca", "USD"),
+    ("KO", "Coca-Cola", "Consumo", "USD"),
+    ("REP.MC", "Repsol", "Energía", "EUR"),
+    ("TEF.MC", "Telefónica", "Telecomunicaciones", "EUR"),
+]
+
+if __name__ == "__main__":
+    conn = conectar()
+    try:
+        crear_tablas(conn)
+        insertar_activos(conn, ACTIVOS)
+        print("Activos en la base:", conn.execute("SELECT COUNT(*) FROM activos;").fetchone()[0])
+    finally:
+        conn.close()
