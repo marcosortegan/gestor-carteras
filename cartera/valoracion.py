@@ -1,41 +1,77 @@
 import sqlite3
 import pandas as pd
-from datetime import date, timedelta
+from datetime import date
+import numpy as np
 
 def acciones_en_fecha(conn, cartera_id, ticker, fecha):
+    pos = posiciones(conn, cartera_id, fecha)
+    if ticker in pos.index:
+        return float(pos.loc[ticker, "acciones"])
+    return 0.0
 
-    fila = conn.execute(
+
+
+def posiciones(conn, cartera_id, fecha=None, incluir_cerradas=False):
+    """Posiciones de una cartera al cierre de `fecha` (hoy si es None).
+
+    Devuelve un DataFrame indexado por ticker con: acciones, coste_medio,
+    coste_total y plusvalia_realizada (en la divisa de cada activo).
+    """
+    if fecha is None:
+        fecha = date.today().isoformat()
+
+    ops = pd.read_sql_query(
         """
-        SELECT COALESCE(SUM(CASE
-                   WHEN tipo = 'compra' THEN cantidad
-                   WHEN tipo = 'venta'  THEN -cantidad
-                   ELSE 0
-               END), 0)
+        SELECT fecha, ticker, tipo, cantidad, precio, comision
         FROM operaciones
-        WHERE cartera_id = ? AND ticker = ? AND fecha <= ?;
+        WHERE cartera_id = ? AND fecha <= ?;
         """,
-        (cartera_id, ticker, fecha),
-    ).fetchone()
-    return fila[0]
+        conn, params=(cartera_id, fecha),
+    )
+    splits = pd.read_sql_query(
+        """
+        SELECT fecha, ticker, 'split' AS tipo, valor AS cantidad,
+               0 AS precio, 0 AS comision
+        FROM eventos
+        WHERE tipo = 'split' AND fecha <= ?
+          AND ticker IN (SELECT ticker FROM operaciones WHERE cartera_id = ?);
+        """,
+        conn, params=(fecha, cartera_id),
+    )
 
-def registrar_operacion(conn, cartera_id, ticker, fecha, tipo, cantidad, precio, comision=0):
+    eventos = pd.concat([splits, ops], ignore_index=True)
+    eventos["orden"] = (eventos["tipo"] != "split").astype(int)   # split = 0 primero
+    eventos = eventos.sort_values(["ticker", "fecha", "orden"], kind="stable")
 
-    if conn.execute("SELECT 1 FROM carteras WHERE id = ?;", (cartera_id,)).fetchone() is None:
-        raise ValueError(f"No existe la cartera {cartera_id}")
-    if conn.execute("SELECT 1 FROM activos WHERE ticker = ?;",(ticker,)).fetchone() is None:
-        raise ValueError(f"El ticker >{ticker}< no está en la tabla activos")
-    if fecha > date.today().isoformat():
-        raise ValueError(f"La fecha {fecha} es futura")
-    acciones = acciones_en_fecha(conn,cartera_id,ticker,fecha)
-    if tipo == "venta" and acciones < cantidad:
-        raise ValueError(f"Quieres vender {cantidad} acciones de {ticker} y hay solo {acciones}")
-    if tipo == "dividendo" and acciones <= 0:
-        raise ValueError(f"No tenías acciones de {ticker} el {fecha}")
-    
-    cur = conn.execute("""INSERT INTO operaciones (cartera_id, ticker, fecha, tipo, cantidad, precio, comision) 
-                     VALUES (?,?,?,?,?,?,?);""", (cartera_id, ticker, fecha, tipo, cantidad, precio, comision,))
-    conn.commit()
-    return cur.lastrowid
+    estado = {}  
+    for ev in eventos.itertuples():
+        e = estado.setdefault(ev.ticker, {"acciones": 0.0, "coste": 0.0, "realizado": 0.0})
+
+        if ev.tipo == "compra":
+            e["acciones"] += ev.cantidad
+            e["coste"] += np.multiply(ev.cantidad,ev.precio)+ev.comision
+        if e["acciones"] <= 0:
+            raise ValueError(f"Venta de {ev.ticker} el {ev.fecha} sin acciones.")
+        elif ev.tipo == "venta":
+            coste_medio = e["coste"] / e["acciones"]
+            e["realizado"] += (ev.precio - coste_medio) * ev.cantidad - ev.comision
+            e["coste"] -= ev.cantidad * coste_medio
+            e["acciones"] -= ev.cantidad
+        elif ev.tipo == "split":
+            e["acciones"] *= ev.cantidad
+
+    columnas = ["acciones", "coste_medio", "coste_total", "plusvalia_realizada"]
+    if not estado:
+        return pd.DataFrame(columns=columnas).rename_axis("ticker")
+
+    df = pd.DataFrame.from_dict(estado, orient="index")
+    df = df.rename(columns={"coste": "coste_total", "realizado": "plusvalia_realizada"})
+    if not incluir_cerradas:
+        df = df[df["acciones"].abs() > 1e-9]
+    df = df.copy()
+    df["coste_medio"] = df["coste_total"] / df["acciones"].where(df["acciones"].abs() > 1e-9)
+    df.index.name = "ticker"
+    return df[columnas].sort_index()
             
 
 
