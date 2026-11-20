@@ -90,7 +90,7 @@ def valor_historico(conn,cartera_id,hasta=None):
 
     precios = precios_largos.pivot(index = "fecha",columns="ticker",values="cierre")
     dias_bolsa = precios.index[precios.index >= dias[0]]
-    precios = precios.reindex(index = dias,columns = tickers).ffill()
+    precios = precios.reindex(precios.index.union(dias)).ffill().reindex(index=dias, columns=tickers)
 
     splits_largos = pd.read_sql_query(f""" SELECT ticker,fecha,valor FROM eventos
     WHERE tipo = 'split' AND ticker in ({huecos}) AND fecha <=?;""",conn, params=(*tickers,hasta), parse_dates=["fecha"])
@@ -106,10 +106,11 @@ def valor_historico(conn,cartera_id,hasta=None):
 
     divisas = dict(conn.execute(f"SELECT ticker, divisa FROM activos WHERE ticker IN ({huecos});",tickers).fetchall())
     fx_largos = pd.read_sql_query("""SELECT fecha, divisa, tasa FROM tipos_cambio WHERE fecha<=?;""", conn, params=(hasta,),parse_dates=["fecha"])    
-    fx_largos = fx_largos.pivot(index="fecha",columns="divisa",values="tasa").reindex(dias).ffill()
+    fx = fx_largos.pivot(index="fecha", columns="divisa", values="tasa")
+    fx = fx.reindex(fx.index.union(dias)).ffill().reindex(dias)
     for t in tickers:
         if divisas[t] != "EUR":
-            valor[t] = valor[t]/ fx_largos[divisas[t]] #lo paso a EUR
+            valor[t] = valor[t]/ fx[divisas[t]] #lo paso a EUR
 
     sin_precio = (acciones.abs() > 1e-9) & valor.isna() #acciones con un casi 0 no nos sirven
     if sin_precio.any().any():
@@ -119,6 +120,81 @@ def valor_historico(conn,cartera_id,hasta=None):
 
     total = valor.sum(axis=1)
     return total.loc[dias_bolsa].rename("valor_eur")
+
+
+
+
+def tipos_cambio_diarios(conn, dias):
+    fx_largos = pd.read_sql_query(
+    "SELECT fecha, divisa, tasa FROM tipos_cambio WHERE fecha <= ?;",
+    conn, params=(dias[-1].strftime("%Y-%m-%d"),), parse_dates=["fecha"])
+    fx = fx_largos.pivot(index="fecha", columns="divisa", values="tasa")
+    fx = fx.reindex(fx.index.union(dias)).ffill().reindex(dias)
+    fx["EUR"] = 1.0
+    return fx
+
+
+def flujos_en_euros(conn, cartera_id, hasta=None):
+    if hasta is None:
+        hasta = date.today().isoformat()
+    ops = pd.read_sql_query(
+        """SELECT o.fecha, o.tipo, o.cantidad * o.precio AS bruto, o.comision, a.divisa
+        FROM operaciones o JOIN activos a ON o.ticker = a.ticker
+        WHERE o.cartera_id = ? AND o.fecha <= ?;""",
+        conn, params=(cartera_id, hasta), parse_dates=["fecha"])
+    if ops.empty:
+        return pd.DataFrame(columns=["fecha", "tipo", "importe_eur", "comision_eur"])
+
+    dias = pd.date_range(ops["fecha"].min(), hasta, freq="D")
+    fx = tipos_cambio_diarios(conn, dias)
+    tasa = [fx.at[f, d] for f, d in zip(ops["fecha"], ops["divisa"])]
+    ops["importe_eur"] = ops["bruto"] / tasa
+    ops["comision_eur"] = ops["comision"] / tasa
+    return ops[["fecha", "tipo", "importe_eur", "comision_eur"]]
+
+
+def rentabilidad_twr(conn,cartera_id,hasta=None):
+    valor = valor_historico(conn,cartera_id,hasta)
+    if len(valor)<2:
+        return pd.Series(dtype=float,name = "rent_diaria")
+
+    fl = flujos_en_euros(conn,cartera_id,hasta)
+    signo = fl["tipo"].map({"compra":1,"venta":-1,"dividendo":-1})
+    fl["flujo"] = fl["importe_eur"]*signo
+    flujo_dia = fl.groupby("fecha")["flujo"].sum()
+
+    #flujos findes/festivos --> al día siguiente de bolsa
+    dias = pd.date_range(min(flujo_dia.index.min(),valor.index.min()),valor.index.max(),freq="D")
+    acumulado = flujo_dia.reindex(dias,fill_value=0).cumsum()
+    flujo_bolsa = acumulado.reindex(valor.index).diff()
+    flujo_bolsa.iloc[0] = acumulado.loc[valor.index[0]]
+
+    anterior = valor.shift(1)
+    rent = (valor-flujo_bolsa)/anterior-1
+    rent = rent.where(anterior > 1e-9)
+    return rent.iloc[1:].fillna(0).rename("rent_diaria")
+
+def resumen_cartera(conn,cartera_id,hasta=None):
+    valor = valor_historico(conn,cartera_id,hasta)
+    fl = flujos_en_euros(conn,cartera_id,hasta)
+    compras = fl[fl["tipo"] == "compra"]
+    ventas = fl[fl["tipo"] == "venta"]
+    divid = fl[fl["tipo"] == "dividendo"]
+
+    aportado = float((compras["importe_eur"] + compras["comision_eur"]).sum())
+    dividendos = float((divid["importe_eur"] - divid["comision_eur"]).sum())
+    retirado = float((ventas["importe_eur"] - ventas["comision_eur"]).sum()) + dividendos
+    valor_actual = float(valor.iloc[-1]) if len(valor) else 0.0
+    rent = rentabilidad_twr(conn, cartera_id, hasta)
+
+    return {
+        "valor_actual": valor_actual,
+        "aportado": aportado,
+        "retirado": retirado,
+        "ganancia_total": valor_actual+retirado-aportado,
+        "dividendos_netos": dividendos,
+        "comisiones": float(fl.loc[fl["tipo"] != "dividendo", "comision_eur"].sum()),
+        "twr": float(np.add(1,rent).prod() - 1)}
     
 
         

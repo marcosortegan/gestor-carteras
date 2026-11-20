@@ -2,7 +2,7 @@ import pandas as pd
 
 from cartera.db import conectar, crear_tablas
 from cartera.operaciones import registrar_operacion
-from cartera.valoracion import valor_historico
+from cartera.valoracion import resumen_cartera, valor_historico
 
 DIAS = ["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08"]
 TASA = 1.20
@@ -39,7 +39,14 @@ def preparar(precio_dia8, con_split):
     return conn
 
 
-def comprobar(nombre, precio_dia8, con_split, esperado):
+def comparar(etiqueta, obtenido, esperado):
+    ok = obtenido is not None and abs(obtenido - esperado) < 0.01
+    marca = "OK " if ok else "MAL"
+    print(f"  {marca} {etiqueta}: esperado {esperado:10.4f}  obtenido {obtenido}")
+    return ok
+
+
+def comprobar_valor(nombre, precio_dia8, con_split, esperado):
     conn = preparar(precio_dia8, con_split)
     resultado = valor_historico(conn, 1, DIAS[-1])
     conn.close()
@@ -48,36 +55,47 @@ def comprobar(nombre, precio_dia8, con_split, esperado):
     print(f"\n{nombre}")
     todo_bien = True
     for dia, valor_esperado in esperado.items():
-        obtenido = resultado.get(dia)
-        ok = obtenido is not None and abs(obtenido - valor_esperado) < 0.01
-        todo_bien = todo_bien and ok
-        marca = "OK " if ok else "MAL"
-        print(f"  {marca} {dia}: esperado {valor_esperado:8.2f}  obtenido {obtenido}")
+        todo_bien &= comparar(dia, resultado.get(dia), valor_esperado)
     print("  Resultado:", "correcto" if todo_bien else "HAY DIFERENCIAS")
     return todo_bien
 
 
+def comprobar_resumen(nombre, precio_dia8, con_split, esperado):
+    conn = preparar(precio_dia8, con_split)
+    resumen = resumen_cartera(conn, 1, DIAS[-1])
+    conn.close()
+
+    print(f"\n{nombre}")
+    todo_bien = True
+    for clave, valor_esperado in esperado.items():
+        todo_bien &= comparar(clave, resumen.get(clave), valor_esperado)
+    print("  Resultado:", "correcto" if todo_bien else "HAY DIFERENCIAS")
+    return todo_bien
+
+
+VALOR_ESPERADO = {
+    "2026-01-05": 833.33,
+    "2026-01-06": 875.00,
+    "2026-01-07": 550.00,
+    "2026-01-08": 600.00,
+}
+
+RESUMEN_ESPERADO = {
+    "valor_actual": 600.00,
+    "aportado": 833.33,
+    "retirado": 366.67,
+    "ganancia_total": 133.33,
+    "dividendos_netos": 0.00,
+    "comisiones": 0.00,
+    "twr": 0.20,
+}
+
+
 if __name__ == "__main__":
-    caso1 = comprobar(
-        "Caso 1: sin split",
-        precio_dia8=120,
-        con_split=False,
-        esperado={
-            "2026-01-05": 833.33,
-            "2026-01-06": 875.00,
-            "2026-01-07": 550.00,
-            "2026-01-08": 600.00,
-        },
-    )
-    caso2 = comprobar(
-        "Caso 2: split 2x1 el día 8 y precio 60",
-        precio_dia8=60,
-        con_split=True,
-        esperado={
-            "2026-01-05": 833.33,
-            "2026-01-06": 875.00,
-            "2026-01-07": 550.00,
-            "2026-01-08": 600.00,
-        },
-    )
-    print("\nTODO CORRECTO" if caso1 and caso2 else "\nREVISA LOS CASOS MARCADOS CON MAL")
+    resultados = [
+        comprobar_valor("Valor: sin split", 120, False, VALOR_ESPERADO),
+        comprobar_valor("Valor: split 2x1 el día 8 y precio 60", 60, True, VALOR_ESPERADO),
+        comprobar_resumen("Resumen: sin split", 120, False, RESUMEN_ESPERADO),
+        comprobar_resumen("Resumen: split 2x1 el día 8 y precio 60", 60, True, RESUMEN_ESPERADO),
+    ]
+    print("\nTODO CORRECTO" if all(resultados) else "\nREVISA LOS CASOS MARCADOS CON MAL")
