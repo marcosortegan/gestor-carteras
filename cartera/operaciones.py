@@ -2,7 +2,7 @@
 
 import sqlite3
 import pandas as pd
-from datetime import date
+from datetime import date, datetime
 from cartera.valoracion import acciones_en_fecha
 
 
@@ -55,6 +55,12 @@ def registrar_operacion(conn, cartera_id, ticker, fecha, tipo, cantidad, precio,
         raise ValueError(f"No existe la cartera {cartera_id}.")
     if conn.execute("SELECT 1 FROM activos WHERE ticker = ?;", (ticker,)).fetchone() is None:
         raise ValueError(f"El ticker {ticker} no está en la tabla de activos.")
+    try:
+        datetime.strptime(fecha, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError(f"La fecha {fecha} no está en el formato AAAA-MM-DD") 
+    if fecha > date.today().isoformat():
+            raise ValueError(f"La fecha {fecha} es futura")
 
     acciones = acciones_en_fecha(conn, cartera_id, ticker, fecha)
     if tipo == "venta":

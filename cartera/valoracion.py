@@ -160,7 +160,7 @@ def rentabilidad_twr(conn,cartera_id,hasta=None):
 
     fl = flujos_en_euros(conn,cartera_id,hasta)
     signo = fl["tipo"].map({"compra":1,"venta":-1,"dividendo":-1})
-    fl["flujo"] = fl["importe_eur"]*signo
+    fl["flujo"] = signo * fl["importe_eur"] + fl["comision_eur"]
     flujo_dia = fl.groupby("fecha")["flujo"].sum()
 
     #flujos findes/festivos --> al día siguiente de bolsa
