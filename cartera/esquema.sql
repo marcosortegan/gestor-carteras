@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS tipos_cambio (
 CREATE TABLE IF NOT EXISTS eventos (
     fecha  TEXT NOT NULL CHECK (fecha GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
     ticker TEXT NOT NULL,
-    tipo   TEXT NOT NULL CHECK (tipo IN ('split')),
+    tipo   TEXT NOT NULL CHECK (tipo IN ('split','dividendo')),
     valor  REAL NOT NULL CHECK (valor > 0),
     PRIMARY KEY (fecha, ticker, tipo),
     FOREIGN KEY (ticker) REFERENCES activos(ticker)

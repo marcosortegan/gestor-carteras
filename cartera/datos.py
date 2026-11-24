@@ -1,10 +1,12 @@
 from datetime import date, timedelta
+
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
 
 def descargar_datos(tickers, inicio, fin):
-    return yf.download(tickers, start=inicio, end=fin, progress=False)
+    return yf.download(tickers, start=inicio, end=fin, auto_adjust=False, progress=False)
 
 
 def reordenar(dat):
@@ -37,6 +39,26 @@ def guardar_precios(conn, df):
     conn.commit()
 
 
+def factor_futuro(fechas, splits):
+    return np.array([splits[splits.index > f].prod() for f in fechas], dtype=float)
+
+
+def splits_guardados(conn, ticker):
+    df = pd.read_sql_query("SELECT fecha, valor FROM eventos WHERE tipo = 'split' AND ticker = ?;",
+                           conn, params=(ticker,), parse_dates=["fecha"])
+    return df.set_index("fecha")["valor"]
+
+
+def desajustar(df, splits):
+    if splits.empty or df.empty:
+        return df
+    f = factor_futuro(pd.to_datetime(df["fecha"]), splits)
+    df = df.copy()
+    df["cierre"] = df["cierre"] * f
+    df["volumen"] = (df["volumen"] / f).round().astype(int)
+    return df
+
+
 def actualizar_precios(conn, tickers):
     hoy = date.today()
     fin = hoy + timedelta(days=1)
@@ -65,9 +87,41 @@ def actualizar_precios(conn, tickers):
             resumen[ticker] = 0
             continue
 
+        df = desajustar(df, splits_guardados(conn, ticker))
         guardar_precios(conn, df)
         resumen[ticker] = len(df)
 
+    return resumen
+
+
+def a_fechas(serie):
+    idx = pd.to_datetime(serie.index)
+    if idx.tz is not None:
+        idx = idx.tz_localize(None)
+    return pd.Series(serie.values, index=idx.normalize(), dtype=float)
+
+
+def actualizar_eventos(conn, tickers):
+    desde = pd.Timestamp(date.today() - timedelta(days=5 * 365))
+    resumen = {}
+    for ticker in tickers:
+        t = yf.Ticker(ticker)
+        splits = a_fechas(t.splits)
+        splits = splits[(splits > 0) & (splits.index >= desde)]
+        divs = a_fechas(t.dividends)
+        divs = divs[(divs > 0) & (divs.index >= desde)]
+        if not divs.empty and not splits.empty:
+            divs = divs * factor_futuro(divs.index, splits)
+
+        filas = [(f.strftime("%Y-%m-%d"), ticker, "split", float(v)) for f, v in splits.items()]
+        filas += [(f.strftime("%Y-%m-%d"), ticker, "dividendo", float(v)) for f, v in divs.items()]
+        if not filas:
+            resumen[ticker] = 0
+            continue
+        cur = conn.executemany(
+            "INSERT OR IGNORE INTO eventos (fecha, ticker, tipo, valor) VALUES (?, ?, ?, ?);", filas)
+        conn.commit()
+        resumen[ticker] = cur.rowcount
     return resumen
 
 

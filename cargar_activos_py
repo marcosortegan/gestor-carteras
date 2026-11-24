@@ -6,6 +6,7 @@ ACTIVOS = [
     ("KO", "Coca-Cola", "Consumo", "USD"),
     ("REP.MC", "Repsol", "Energía", "EUR"),
     ("TEF.MC", "Telefónica", "Telecomunicaciones", "EUR"),
+    ("URTH", "iShares MSCI World", "Índice", "USD")
 ]
 
 if __name__ == "__main__":

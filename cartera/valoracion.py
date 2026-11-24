@@ -84,7 +84,6 @@ def valor_historico(conn,cartera_id,hasta=None):
     tickers = sorted(ops["ticker"].unique())
     huecos = ", ".join("?"*len(tickers))  
     dias = pd.date_range(ops["fecha"].min(),hasta, freq = "D")
-
     precios_largos = pd.read_sql_query(f""" SELECT fecha, ticker, cierre FROM precios_diarios
     WHERE ticker IN ({huecos}) AND fecha <=?;""",conn, params=(*tickers,hasta), parse_dates=["fecha"],) 
 
@@ -151,6 +150,39 @@ def flujos_en_euros(conn, cartera_id, hasta=None):
     ops["importe_eur"] = ops["bruto"] / tasa
     ops["comision_eur"] = ops["comision"] / tasa
     return ops[["fecha", "tipo", "importe_eur", "comision_eur"]]
+
+
+def rentabilidades_totales(conn, tickers, moneda="EUR"):
+    huecos = ", ".join("?" * len(tickers))
+
+    largos = pd.read_sql_query(f"SELECT fecha, ticker, cierre FROM precios_diarios WHERE ticker IN ({huecos});",
+                               conn, params=tickers, parse_dates=["fecha"])
+    precios = largos.pivot(index="fecha", columns="ticker", values="cierre").reindex(columns=tickers).ffill()
+
+    ev = pd.read_sql_query(f"SELECT fecha, ticker, tipo, valor FROM eventos WHERE ticker IN ({huecos});",
+                           conn, params=tickers, parse_dates=["fecha"])
+    splits = ev[ev["tipo"] == "split"].pivot(index="fecha", columns="ticker", values="valor")
+    splits = splits.reindex(index=precios.index, columns=tickers).fillna(1)
+    divs = ev[ev["tipo"] == "dividendo"].pivot(index="fecha", columns="ticker", values="valor")
+    divs = divs.reindex(index=precios.index, columns=tickers).fillna(0)
+
+    if moneda == "EUR":
+        divisas = dict(conn.execute(f"SELECT ticker, divisa FROM activos WHERE ticker IN ({huecos});",
+                                    tickers).fetchall())
+        fx = tipos_cambio_diarios(conn, precios.index)
+        tasas = pd.DataFrame({t: fx[divisas[t]] for t in tickers})
+        precios = precios / tasas
+        divs = divs / tasas
+
+    r = (precios * splits + divs) / precios.shift(1) - 1
+    return r.iloc[1:]
+
+
+def a_log(r):
+    return np.log1p(r)
+
+def a_simple(l):
+    return np.expm1(l)
 
 
 def rentabilidad_twr(conn,cartera_id,hasta=None):
